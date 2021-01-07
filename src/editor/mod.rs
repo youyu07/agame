@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 
 
-mod orbit_camera;
-use orbit_camera::*;
+mod camera;
+mod outline;
+
+use camera::*;
 
 pub struct Editor;
 

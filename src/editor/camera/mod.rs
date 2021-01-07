@@ -76,22 +76,28 @@ fn on_mouse_motion(mut state: ResMut<State>, events: Res<Events<MouseMotion>>, m
     }
     for (mut camera, mut transform) in query.iter_mut() {
         if camera.mouse_down[0] {
-            let ry = Quat::from_rotation_y(delta.x * 0.01);
-            let rx = Quat::from_rotation_x(delta.y * -0.01);
+            let rx = Quat::from_axis_angle(transform.rotation * Vec3::unit_y(), delta.x * -0.01);
+
+            let ry = {
+                let cos_angle = transform.forward().dot(Vec3::unit_y());
+                if cos_angle * delta.y.signum() > 0.99 {
+                    delta.y = 0.0;
+                }
+                Quat::from_axis_angle(transform.rotation * Vec3::unit_x(), delta.y * -0.01)
+            };
 
             let t = {
-                let dir = (rx * ry) * Vec3::new(1.0,1.0,1.0);
-                let mut t = Transform::from_translation(3.0 * dir);
-                t.look_at(Vec3::zero(), Vec3::unit_y());
+                Transform::from_translation(camera.target) * Transform::from_rotation(rx) * Transform::from_rotation(ry) * Transform::from_translation(-camera.target)
+            };
+
+            let t = {
+                let mut t = Transform::from_translation(t * transform.translation);
+                t.look_at(camera.target, Vec3::unit_y());
                 t
             };
 
             transform.translation = t.translation;
             transform.rotation = t.rotation;
-
-            //let len = (transform.translation - camera.target).length();
-            
-            //transform.translation = transform.translation +  transform.rotation * (len * Vec3::unit_x());
         }
 
         if camera.mouse_down[2] {
