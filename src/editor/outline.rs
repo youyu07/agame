@@ -8,7 +8,7 @@ pub struct OutlinePlugin;
 
 impl Plugin for OutlinePlugin
 {
-    fn build(&self, app: &mut AppBuilder) {
+    fn build(&self, _app: &mut AppBuilder) {
         
     }
 }
