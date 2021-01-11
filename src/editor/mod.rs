@@ -16,7 +16,6 @@ impl Plugin for Editor
             .add_plugin(OrbitCameraPlugin)
             .add_startup_system(setup.system());
     }
-
 }
 
 fn setup(command: &mut Commands)
