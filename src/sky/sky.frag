@@ -1,134 +1,124 @@
 #version 450
-layout(location = 0) in vec3 v_pos;
+
+layout(location = 0) in vec3 vWorldPosition;
 layout(location = 0) out vec4 o_Target;
 
-#define PI 3.1415926538
-#define RAYLEIGH 1.0
-#define REFRACTIVE_INDEX 1.0003
-#define DEPOLARIZATION_FACTOR 1000.0
-#define NUM_MOLECULES 2.542e25
-#define MIE_V 4.0
-#define MIE_COEFFICIENT 0.005
-#define MIE_DIRECTIONAL_G 0.8
-#define MIE_ZENITH_LENGTH 1.25e3
-#define TURBIDITY 2.0
-#define SUN_INTENSITY_FACTOR 1000.0
-#define SUN_INTENSITY_FALLOFF_STEEPNESS 1.5
-#define RAYLEIGH_ZENITH_LENGTH 8.4e3
-#define SUN_ANGULAR_DIAMETER_DEGREES 0.0093333
-#define PRIMARIES vec3(6.8e-7, 5.5e-7, 4.5e-7)
-#define MIE_K_COEFFICIENT vec3(0.686, 0.678, 0.666)
+layout(set = 2, binding = 0) uniform SkyMaterial {
+	mat4  camera_view;
+	vec3  sun_position;
+	float sun_intensity_factor;
+	vec3  mie_k_coefficient;
+	float sun_intensity_falloff_steepness;
+	vec3  primaries;
+	float sun_angular_diameter_degrees;
+	float luminance;
+	float mie_coefficient;
+	float mie_directional_g;
+	float mie_v;
+	float mie_zenith_length;
+	float depolarization_factor;
+	float num_molecules;
+	float rayleigh;
+	float rayleigh_zenith_length;
+	float refractive_index;
+	float tonemap_weighting;
+	float turbidity;
+};
 
-float acos_approx(float v)
+// Based on "A Practical Analytic Model for Daylight" aka The Preetham Model, the de facto standard analytic skydome model
+// http://www.cs.utah.edu/~shirley/papers/sunsky/sunsky.pdf
+// Original implementation by Simon Wallner: http://www.simonwallner.at/projects/atmospheric-scattering
+// Improved by Martin Upitis: http://blenderartists.org/forum/showthread.php?245954-preethams-sky-impementation-HDR
+// Three.js integration by zz85: http://twitter.com/blurspline / https://github.com/zz85 / http://threejs.org/examples/webgl_shaders_sky.html
+// Additional uniforms, refactoring and integrated with editable sky example: https://twitter.com/Sam_Twidale / https://github.com/Tw1ddle/Sky-Particles-Shader
+
+const float PI = 3.141592653589793238462643383279502884197169;
+const vec3 UP = vec3(0.0, 1.0, 0.0);
+
+vec3 totalRayleigh(vec3 lambda)
 {
-    float x = abs(v);
-    float res = -0.155972 * x + 1.56467;
-    res = res * sqrt(1.0 - x);
-    return v >= 0.0 ? res : PI - res;
+	return (8.0 * pow(PI, 3.0) * pow(pow(refractive_index, 2.0) - 1.0, 2.0) * (6.0 + 3.0 * depolarization_factor)) 
+			/ (3.0 * num_molecules * pow(lambda, vec3(4.0)) * (6.0 - 7.0 * depolarization_factor));
 }
 
-vec3 tonemap(vec3 col)
+vec3 totalMie(vec3 lambda, vec3 K, float T)
 {
-    const float A = 2.35;
-    const float B = 2.8826666;
-    const float C = 789.7459;
-    const float D = 0.935;
-    vec3 z = pow(col, vec3(A));
-    return z / (pow(z, vec3(D)) * B + C);
+	float c = 0.2 * T * 10e-18;
+	return 0.434 * c * PI * pow((2.0 * PI) / lambda, vec3(mie_v - 2.0)) * K;
 }
 
-vec3 total_rayleigh(vec3 lambda)
+float rayleighPhase(float cosTheta)
 {
-    return (8.0 * pow(PI, 3.0) * pow(pow(REFRACTIVE_INDEX, 2.0) - 1.0, 2.0) * (6.0 + 3.0 * DEPOLARIZATION_FACTOR))
-            / (3.0 * NUM_MOLECULES * pow(lambda, vec3(4.0)) * (6.0 - 7.0 * DEPOLARIZATION_FACTOR));
+	return (3.0 / (16.0 * PI)) * (1.0 + pow(cosTheta, 2.0));
 }
 
-vec3 total_mie(vec3 lambda, vec3 k, float t)
+float henyeyGreensteinPhase(float cosTheta, float g)
 {
-    float c = 0.2 * t * 10e-18;
-    return 0.434 * c * PI * pow(vec3(2.0 * PI) / lambda, vec3(MIE_V - 2.0)) * k;
+	return (1.0 / (4.0 * PI)) * ((1.0 - pow(g, 2.0)) / pow(1.0 - 2.0 * g * cosTheta + pow(g, 2.0), 1.5));
 }
 
-float rayleigh_phase(float cos_theta)
+float sunIntensity(float zenithAngleCos)
 {
-    return (3.0 / (16.0 * PI)) * (1.0 - pow(cos_theta, 2.0));
+	float cutoffAngle = PI / 1.95; // Earth shadow hack
+	return sun_intensity_factor * max(0.0, 1.0 - exp(-((cutoffAngle - acos(zenithAngleCos)) / sun_intensity_falloff_steepness)));
 }
 
-float henyey_greenstein_phase(float cos_theta, float g)
+// Whitescale tonemapping calculation, see http://filmicgames.com/archives/75
+// Also see http://blenderartists.org/forum/showthread.php?321110-Shaders-and-Skybox-madness
+const float A = 0.15; // Shoulder strength
+const float B = 0.50; // Linear strength
+const float C = 0.10; // Linear angle
+const float D = 0.20; // Toe strength
+const float E = 0.02; // Toe numerator
+const float F = 0.30; // Toe denominator
+vec3 Uncharted2Tonemap(vec3 W)
 {
-    return (1.0 / (4.0 * PI)) * pow(((1.0 - pow(g, 2.0)) / (1.0 - 2.0 * g * cos_theta + pow(g, 2.0))), 1.5);
+	return ((W * (A * W + C * B) + D * E) / (W * (A * W + B) + D * F)) - E / F;
 }
 
-float sun_intensity(float zenith_angle_cos)
+void main()
 {
-    float cutoff_angle = PI / 1.95;
-    return SUN_INTENSITY_FACTOR * max(0.0, 1.0 - exp(-((cutoff_angle - acos_approx(zenith_angle_cos)) / SUN_INTENSITY_FALLOFF_STEEPNESS)));
-}
+	vec3 camera_position = (camera_view * vec4(1.0)).xyz;
+	// Rayleigh coefficient
+	float sunfade = 1.0 - clamp(1.0 - exp((sun_position.y / 450000.0)), 0.0, 1.0);
+	float rayleighCoefficient = rayleigh - (1.0 * (1.0 - sunfade));
+	vec3 betaR = totalRayleigh(primaries) * rayleighCoefficient;
+	
+	// Mie coefficient
+	vec3 betaM = totalMie(primaries, mie_k_coefficient, turbidity) * mie_coefficient;
+	
+	// Optical length, cutoff angle at 90 to avoid singularity
+	float zenithAngle = acos(max(0.0, dot(UP, normalize(vWorldPosition - camera_position))));
+	float denom = cos(zenithAngle) + 0.15 * pow(93.885 - ((zenithAngle * 180.0) / PI), -1.253);
+	float sR = rayleigh_zenith_length / denom;
+	float sM = mie_zenith_length / denom;
+	
+	// Combined extinction factor
+	vec3 Fex = exp(-(betaR * sR + betaM * sM));
+	
+	// In-scattering
+	vec3 sunDirection = normalize(sun_position);
+	float cosTheta = dot(normalize(vWorldPosition - camera_position), sunDirection);
+	vec3 betaRTheta = betaR * rayleighPhase(cosTheta * 0.5 + 0.5);
+	vec3 betaMTheta = betaM * henyeyGreensteinPhase(cosTheta, mie_directional_g);
+	float sunE = sunIntensity(dot(sunDirection, UP));
+	vec3 Lin = pow(sunE * ((betaRTheta + betaMTheta) / (betaR + betaM)) * (1.0 - Fex), vec3(1.5));
+	Lin *= mix(vec3(1.0), pow(sunE * ((betaRTheta + betaMTheta) / (betaR + betaM)) * Fex, vec3(0.5)), clamp(pow(1.0 - dot(UP, sunDirection), 5.0), 0.0, 1.0));
+	
+	// Composition + solar disc
+	float sunAngularDiameterCos = cos(sun_angular_diameter_degrees);
+	float sundisk = smoothstep(sunAngularDiameterCos, sunAngularDiameterCos + 0.00002, cosTheta);
+	vec3 L0 = vec3(0.1) * Fex;
+	L0 += sunE * 19000.0 * Fex * sundisk;
+	vec3 texColor = Lin + L0;
+	texColor *= 0.04;
+	texColor += vec3(0.0, 0.001, 0.0025) * 0.3;
+	
+	// Tonemapping
+	vec3 whiteScale = 1.0 / Uncharted2Tonemap(vec3(tonemap_weighting));
+	vec3 curr = Uncharted2Tonemap((log2(2.0 / pow(luminance, 4.0))) * texColor);
+	vec3 color = curr * whiteScale;
+	vec3 retColor = pow(color, vec3(1.0 / (1.2 + (1.2 * sunfade))));
 
-vec3 sky(vec3 dir, vec3 sun_position)
-{
-    vec3 up = vec3(0.0,1.0,0.0);
-    float sunfade = 1.0 - (1.0 - exp(clamp(sun_position.y / 450000.0, 0.0, 1.0)));
-    float rayleigh_coefficient = RAYLEIGH - (1.0 * (1.0 - sunfade));
-    vec3 beta_r = total_rayleigh(PRIMARIES) * rayleigh_coefficient;
-
-    vec3 beta_m = total_mie(PRIMARIES, MIE_K_COEFFICIENT, TURBIDITY) * MIE_COEFFICIENT;
-    
-    float zenith_angle = acos_approx(max(0.0,dot(up, dir)));
-    float denom = cos(zenith_angle) + 0.15 * pow(93.885 - (zenith_angle * 180.0 / PI), -1.253);
-
-    float s_r = RAYLEIGH_ZENITH_LENGTH / denom;
-    float s_m = MIE_ZENITH_LENGTH / denom;
-
-    vec3 fex = exp(-(beta_r * s_r + beta_m * s_m));
-
-    vec3 sun_direction = normalize(sun_position);
-    float cos_theta = dot(dir, sun_direction);
-    vec3 beta_r_theta = beta_r * rayleigh_phase(cos_theta * 0.5 + 0.5);
-
-    vec3 beta_m_theta = beta_m * henyey_greenstein_phase(cos_theta, MIE_DIRECTIONAL_G);
-    float sun_e = sun_intensity(dot(sun_direction, up));
-    vec3 lin = pow(sun_e * ((beta_r_theta + beta_m_theta) / (beta_r + beta_m)) * (vec3(1.0) - fex), vec3(1.5));
-    lin = lin * mix(
-        vec3(1.0), 
-        pow(sun_e * ((beta_r_theta + beta_m_theta)/(beta_r + beta_m)) * fex, vec3(0.5)), 
-        clamp(pow(1.0 - dot(up, sun_direction), 5.0), 0.0, 1.0)
-    );
-
-    float sun_angular_diameter_cos = cos(SUN_ANGULAR_DIAMETER_DEGREES);
-    float sundisk = smoothstep(sun_angular_diameter_cos , sun_angular_diameter_cos + 0.00002, cos_theta);
-    vec3 l0 = 0.1 * fex;
-    l0 = l0 + sun_e * 19000.0 * fex * sundisk;
-
-    return lin + l0;
-}
-
-vec3 get_ray_dir(vec2 uv, vec3 pos, vec3 look_at_pos)
-{
-    vec3 forward = normalize(look_at_pos - pos);
-    vec3 right = normalize(cross(vec3(0.0,1.0,0.0), forward));
-    vec3 up = cross(forward, right);
-    return normalize(forward + uv.x * right + uv.y * up);
-}
-
-vec4 fs()
-{
-    vec2 view_size = vec2(1280.0, 720.0);
-
-    vec2 uv = (v_pos.xy - 0.5 * view_size) / view_size.y;
-    uv.y = -uv.y;
-
-    vec3 eye_pos = vec3(0.0, 0.0997, 0.2);
-    vec3 sun_pos = vec3(0.0, 75.0, -1000.0);
-    vec3 dir = get_ray_dir(uv, eye_pos, sun_pos);
-
-    vec3 color = sky(dir, sun_pos);
-    color = clamp(color, vec3(0.0), vec3(1024.0));
-
-    return vec4(tonemap(color), 1.0);
-}
-
-
-void main() {
-    o_Target = fs();
+	o_Target = vec4(retColor, 1.0);
 }
